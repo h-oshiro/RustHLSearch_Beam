@@ -1,0 +1,437 @@
+use crate::bitmask::BitMask;
+use indicatif::{ProgressBar, ProgressStyle};
+use log::info;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// 基底行の生成と補集合シフトテーブルの作成
+pub fn build_shift_table(primes: &[usize], cols: usize) -> Vec<Vec<BitMask>> {
+    let mut shift_table = Vec::with_capacity(primes.len());
+
+    for &p in primes {
+        let mut complement_shifts = Vec::with_capacity(p);
+        for k in 0..p {
+            let mut mask = BitMask::new_ones(cols);
+            for col in 0..cols {
+                let idx = col + 1;
+                if col >= k {
+                    let orig_idx = idx - k;
+                    if orig_idx % p == 1 {
+                        mask.set(col, false);
+                    }
+                }
+            }
+            complement_shifts.push(mask);
+        }
+        shift_table.push(complement_shifts);
+    }
+
+    shift_table
+}
+
+#[derive(Clone)]
+struct Frame {
+    level: usize,
+    base_mask: BitMask,
+    next_idx: usize,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum SearchMode {
+    Sequential,
+    Parallel,
+    Beam,
+}
+
+#[derive(Default)]
+pub struct SharedResults {
+    pub max_count: usize,
+    pub results: usize,
+    pub shifts: Vec<Vec<usize>>,
+}
+
+#[derive(Clone)]
+struct BeamState {
+    key: Vec<usize>,
+    mask: BitMask,
+}
+
+pub struct State {
+    pub primes: Vec<usize>,
+    pub limit: usize,
+    pub max_depth: usize,
+    pub target: usize,
+    pub key: Vec<usize>,
+    pub zero_mask: BitMask,
+    pub max_count: usize,
+    pub results: usize,
+    pub shifts: Vec<Vec<usize>>,
+    pub node_count: u64,
+    pub beam_width: usize,
+    shift_table: Vec<Vec<BitMask>>,
+}
+
+impl State {
+    pub fn new(
+        primes: Vec<usize>,
+        limit: usize,
+        cols: usize,
+        shift_table: Vec<Vec<BitMask>>,
+    ) -> Self {
+        State {
+            primes,
+            limit,
+            max_depth: 249,
+            target: 447,
+            key: Vec::new(),
+            zero_mask: BitMask::new_ones(cols),
+            max_count: 0,
+            results: 0,
+            shifts: Vec::new(),
+            node_count: 0,
+            beam_width: 32,
+            shift_table,
+        }
+    }
+
+    pub fn search_beam(&mut self, depth: usize, beam_width: usize) {
+        let width = beam_width.max(1);
+        self.beam_width = width;
+        let pb = progress_bar();
+        let mut beam = vec![BeamState {
+            key: Vec::new(),
+            mask: self.zero_mask.clone(),
+        }];
+
+        self.key.clear();
+        self.max_count = 0;
+        self.results = 0;
+        self.shifts.clear();
+
+        for level in 0..depth {
+            let mut next_beam = Vec::new();
+            for candidate in &beam {
+                let prime = self.primes[level];
+                for i in (0..prime).rev() {
+                    let mut key = candidate.key.clone();
+                    key.push(i);
+                    let node_mask = candidate.mask.bitand(&self.shift_table[level][i]);
+                    let count = node_mask.count_ones();
+
+                    if count < self.limit {
+                        continue;
+                    }
+
+                    if count < self.max_count {
+                        continue;
+                    }
+
+                    if level + 1 >= depth {
+                        if count > self.max_count {
+                            self.max_count = count;
+                            self.shifts.clear();
+                            self.shifts.push(key.clone());
+                            info!("best level={} key={:?} count={}", level, key, count);
+                        } else if count == self.max_count {
+                            self.shifts.push(key.clone());
+                            info!("best level={} key={:?} count={}", level, key, count);
+                        }
+
+                        if count == self.target {
+                            self.results += 1;
+                            info!("target level={} key={:?} count={}", level, key, count);
+                        }
+                    }
+
+                    next_beam.push(BeamState {
+                        key,
+                        mask: node_mask,
+                    });
+                }
+            }
+
+            if next_beam.is_empty() {
+                break;
+            }
+
+            next_beam.sort_by(|lhs, rhs| rhs.mask.count_ones().cmp(&lhs.mask.count_ones()));
+            next_beam.truncate(width);
+            beam = next_beam;
+
+            if self.results > 0 {
+                break;
+            }
+        }
+
+        pb.finish_with_message("探索完了");
+    }
+
+    pub fn beam_search(&mut self, depth: usize, beam_width: usize) {
+        self.search_beam(depth, beam_width);
+    }
+
+    pub fn search(&mut self, depth: usize) {
+        let pb = progress_bar();
+        let mut stack = vec![Frame {
+            level: 0,
+            base_mask: self.zero_mask.clone(),
+            next_idx: self.primes[0],
+        }];
+
+        while let Some(frame) = stack.last_mut() {
+            if frame.next_idx == 0 {
+                stack.pop();
+                if let Some(parent) = stack.last() {
+                    self.key.pop();
+                    self.zero_mask = parent.base_mask.clone();
+                }
+                continue;
+            }
+
+            frame.next_idx -= 1;
+            let i = frame.next_idx;
+            let level = frame.level;
+            let base_mask = frame.base_mask.clone();
+            self.key.push(i);
+            self.node_count += 1;
+
+            let node_mask = base_mask.bitand(&self.shift_table[level][i]);
+            let count = node_mask.count_ones();
+
+            if self.node_count.is_multiple_of(10_000) {
+                pb.set_position(self.node_count);
+                pb.set_message(format!(
+                    "best: {} | hits: {} | depth: {}",
+                    self.max_count,
+                    self.results,
+                    self.key.len()
+                ));
+            }
+
+            if count < self.limit {
+                self.key.pop();
+                continue;
+            }
+
+            if count < self.max_count {
+                self.key.pop();
+                continue;
+            }
+
+            if level + 1 >= depth {
+                if depth == self.max_depth {
+                    if count == self.target {
+                        self.results += 1;
+                        self.shifts.push(self.key.clone());
+                        info!("target level={} key={:?} count={}", level, self.key, count);
+                        self.key.pop();
+                        break;
+                    }
+                    if count > self.max_count {
+                        self.max_count = count;
+                        self.shifts.clear();
+                        self.shifts.push(self.key.clone());
+                        info!("best level={} key={:?} count={}", level, self.key, count);
+                    } else if count == self.max_count {
+                        self.shifts.push(self.key.clone());
+                        info!("best level={} key={:?} count={}", level, self.key, count);
+                    }
+                }
+                self.key.pop();
+                continue;
+            }
+
+            self.zero_mask = node_mask.clone();
+            stack.push(Frame {
+                level: level + 1,
+                base_mask: node_mask,
+                next_idx: self.primes[level + 1],
+            });
+        }
+        pb.finish_with_message("探索完了");
+    }
+
+    pub fn search_parallel(&self, depth: usize) -> SharedResults {
+        let max_count = Arc::new(AtomicUsize::new(0));
+        let results = Arc::new(AtomicUsize::new(0));
+        let shifts = Arc::new(Mutex::new(Vec::<Vec<usize>>::new()));
+        let node_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let pb = progress_bar();
+
+        let p0 = self.primes[0];
+        (0..p0).into_par_iter().rev().for_each(|i| {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let mut key = vec![i];
+            let base_mask = self.zero_mask.bitand(&self.shift_table[0][i]);
+            let count = base_mask.count_ones();
+            if count < self.limit {
+                return;
+            }
+
+            if depth == 1 {
+                max_count.fetch_max(count, Ordering::Relaxed);
+                if count == self.limit && !stop.swap(true, Ordering::Relaxed) {
+                    results.fetch_add(1, Ordering::Relaxed);
+                    shifts.lock().unwrap().push(key.clone());
+                    info!("target level=0 key={:?} count={}", key, count);
+                }
+                return;
+            }
+
+            let mut stack = vec![Frame {
+                level: 1,
+                base_mask,
+                next_idx: self.primes[1],
+            }];
+
+            while let Some(frame) = stack.last_mut() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if frame.next_idx == 0 {
+                    stack.pop();
+                    if stack.last().is_some() {
+                        key.pop();
+                    }
+                    continue;
+                }
+
+                frame.next_idx -= 1;
+                let idx = frame.next_idx;
+                let level = frame.level;
+                let current_base = frame.base_mask.clone();
+                key.push(idx);
+                let n = node_count.fetch_add(1, Ordering::Relaxed) + 1;
+                let node_mask = current_base.bitand(&self.shift_table[level][idx]);
+                let c_count = node_mask.count_ones();
+
+                if n.is_multiple_of(10_000) {
+                    pb.set_position(n);
+                    pb.set_message(format!(
+                        "best: {} | hits: {} | depth: {}",
+                        max_count.load(Ordering::Relaxed),
+                        results.load(Ordering::Relaxed),
+                        key.len()
+                    ));
+                }
+
+                if c_count < self.limit {
+                    key.pop();
+                    continue;
+                }
+
+                if c_count < max_count.load(Ordering::Relaxed) {
+                    key.pop();
+                    continue;
+                }
+
+                if level + 1 >= depth {
+                    if c_count == self.limit && !stop.swap(true, Ordering::Relaxed) {
+                        results.fetch_add(1, Ordering::Relaxed);
+                        shifts.lock().unwrap().push(key.clone());
+                        info!("target level={} key={:?} count={}", level, key, c_count);
+                    }
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    key.pop();
+                    continue;
+                }
+
+                if depth == self.max_depth {
+                    if c_count > max_count.load(Ordering::Relaxed) {
+                        max_count.store(c_count, Ordering::Relaxed);
+                        shifts.lock().unwrap().clear();
+                        shifts.lock().unwrap().push(key.clone());
+                        info!("best level={} key={:?} count={}", level, key, c_count);
+                    } else if c_count == max_count.load(Ordering::Relaxed) {
+                        shifts.lock().unwrap().push(key.clone());
+                        info!("best level={} key={:?} count={}", level, key, c_count);
+                    }
+                }
+
+                stack.push(Frame {
+                    level: level + 1,
+                    base_mask: node_mask,
+                    next_idx: self.primes[level + 1],
+                });
+            }
+        });
+
+        pb.finish_with_message("探索完了");
+        let final_shifts = shifts.lock().unwrap();
+        SharedResults {
+            max_count: max_count.load(Ordering::Relaxed),
+            results: results.load(Ordering::Relaxed),
+            shifts: final_shifts.clone(),
+        }
+    }
+}
+
+fn progress_bar() -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} [{elapsed_precise}] nodes: {human_pos} ({per_sec}) {msg}")
+            .unwrap(),
+    );
+    pb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_shift_table, State};
+
+    #[test]
+    fn build_shift_table_creates_expected_complement_masks() {
+        let table = build_shift_table(&[2], 6);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].len(), 2);
+        assert_eq!(table[0][0].count_ones(), 3);
+        assert_eq!(table[0][1].count_ones(), 3);
+    }
+
+    #[test]
+    fn sequential_and_parallel_search_find_valid_results() {
+        let primes = vec![2, 3];
+        let cols = 4;
+        let table = build_shift_table(&primes, cols);
+        let mut sequential = State::new(primes.clone(), 1, cols, table.clone());
+        sequential.max_depth = 2;
+        sequential.target = 1;
+        sequential.search(2);
+        let mut parallel = State::new(primes.clone(), 1, cols, table);
+        parallel.max_depth = 2;
+        parallel.target = 1;
+        let result = parallel.search_parallel(2);
+
+        assert_eq!(sequential.results, 1);
+        assert_eq!(result.results, 1);
+        assert_eq!(result.shifts.len(), 1);
+        assert_eq!(result.shifts[0].len(), 2);
+        for (level, &shift) in result.shifts[0].iter().enumerate() {
+            assert!(shift < primes[level]);
+        }
+    }
+
+    #[test]
+    fn beam_search_keeps_best_partial_states() {
+        let primes = vec![2, 3];
+        let cols = 4;
+        let table = build_shift_table(&primes, cols);
+        let mut beam = State::new(primes, 1, cols, table);
+        beam.max_depth = 2;
+        beam.target = 1;
+
+        beam.search_beam(2, 2);
+
+        assert!(beam.results >= 1);
+        assert!(!beam.shifts.is_empty());
+        assert_eq!(beam.shifts[0].len(), 2);
+    }
+}
