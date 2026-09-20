@@ -1,12 +1,12 @@
 # RustHLSearch
 
-HLSearch（素数シフト探索）の Rust 実装です。指定した深さまでの素数シフト列を探索し、葉のビット数（popcount）が `limit` に一致するパスを記録します。探索手法として、通常の深さ優先探索（DFS）だけでなく、各深さで候補を絞るビームサーチにも対応しています。
+HLSearch（素数シフト探索）の Rust 実装です。指定した深さまでの素数シフト列を探索し、葉のビット数（popcount）が最大となるパスを記録します。探索手法として、通常の深さ優先探索（DFS）だけでなく、各深さで候補を絞るビームサーチにも対応しています。
 
 ## 機能・特徴
 
 - **高速なビット並列処理**: 64-bit 単位の独自 `BitMask` 構造体による高速 bitwise AND および popcount。
 - **逐次 DFS / 並列 DFS / ビームサーチ**: `sequential`, `parallel`, `beam` の3つの探索モードを提供。
-- **早期打ち切り**: 並列モードでは `limit` 一致解が見つかった時点で全スレッドを停止。
+- **最大値探索**: 指定した深さの全候補を探索し、最大 popcount のパスを記録。
 - **ビーム幅制御**: `beam` モードでは `--beam-width` により候補の上位のみを保持して探索を高速化。
 - **降順探索**: 各素数のシフト候補を降順（$p-1 \dots 0$）に探索。
 - **リアルタイム進捗表示**: `indicatif` による探索ノード数・処理速度・最良 popcount のライブ表示。
@@ -66,7 +66,7 @@ cargo run --release -- --help
 
 ### 実行例
 
-デフォルト（並列モード、深さ 8、limit 447、cols 3159）:
+デフォルト（並列モード、深さ 8、cols 3159）:
 
 ```bash
 cargo run --release
@@ -75,19 +75,19 @@ cargo run --release
 逐次モード（単一スレッド）で実行:
 
 ```bash
-cargo run --release -- --mode sequential --depth 8 --limit 447
+cargo run --release -- --mode sequential --depth 8
 ```
 
 ビームサーチ（候補を幅優先で絞り込む）:
 
 ```bash
-cargo run --release -- --mode beam --beam-width 32 --depth 8 --limit 447
+cargo run --release -- --mode beam --beam-width 32 --depth 8
 ```
 
 素数の個数や出力先を指定して実行:
 
 ```bash
-cargo run --release -- --depth 10 --limit 400 --primes-count 100 -o result.json
+cargo run --release -- --depth 10 -o result.json
 ```
 
 > **Note**: 並列モード時のスレッド数は Rayon の既定値（論理コア数）となります。環境変数 `RAYON_NUM_THREADS` でスレッド数を指定可能です。
@@ -98,23 +98,21 @@ cargo run --release -- --depth 10 --limit 400 --primes-count 100 -o result.json
 
 - `depth` は 1 以上
 - `cols` は 1 以上
-- `limit` は `cols` 以下
-- `primes-count` は 1 以上かつ利用可能な素数数以下
 - `depth` は使用する素数数以下
 
 ## 探索アルゴリズムの概要
 
 1. **素数生成**:
-   - 1579 以下の素数（最大 249 個）をエラトステネスの篩で生成し、先頭から `depth` 個を探索階層に使用します（`--primes-count` で上限指定可能）。
+  - 1579 以下の素数（最大 249 個）をエラトステネスの篩で生成し、先頭から `depth` 個を探索階層に使用します。
 2. **補集合シフトテーブル作成**:
    - 各素数 $p$ とシフト $k \in [0, p)$ について、長さ `cols` の補集合ビットマスクを事前構築します。
 3. **検索モード**:
    - `sequential`: 非再帰 DFS で決定論的に探索。
-   - `parallel`: 第1素数の候補を Rayon で並列化し、最初の `limit` 一致解を見つけた時点で停止。
+  - `parallel`: 第1素数の候補を Rayon で並列化し、最大 popcount を集計。
    - `beam`: 各深さで popcount を基準に候補をソートし、`--beam-width` の上位だけを保持して探索を続行。
 4. **葉ノード（深さ `depth`）の判定**:
    - popcount がこれまでの最大値を超えた場合、`max_count` を更新します。
-   - popcount が `limit` と一致した場合、そのシフトパスを記録して探索を終了します。
+  - 最大 popcount に到達したシフトパスを記録します。
 
 ### 探索モード
 
@@ -122,7 +120,7 @@ cargo run --release -- --depth 10 --limit 400 --primes-count 100 -o result.json
 - `--mode parallel`（デフォルト）: 第1素数のシフト候補を逆順（降順）で Rayon の並列イテレータに分配し、複数スレッドで並列 DFS します。いずれかのスレッドが解を見つけた時点で全スレッドを停止します。
 - `--mode beam`: 各階層で候補の popcount を比較し、`--beam-width` の上位候補のみを残します。探索空間を削減して高速化を狙います。
 
-並列モードではスレッドの実行順序により、記録される解のシフト列が逐次モードと異なる場合があります。どちらのモードも、最初に見つかった `limit` 一致の解を1件記録して探索を終了します。
+並列モードではスレッドの実行順序により、記録される解のシフト列が逐次モードと異なる場合があります。
 
 ## コマンドラインオプション
 
@@ -131,14 +129,11 @@ cargo run --release -- --depth 10 --limit 400 --primes-count 100 -o result.json
 | `--depth` | `-d` | `8` | 探索する階層数（使用する素数の個数） |
 | `--mode` | `-m` | `parallel` | 探索モード（`sequential` / `parallel` / `beam`） |
 | `--beam-width` |  | `32` | `beam` モードで保持する候補の最大数 |
-| `--limit` | `-l` | `447` | 枝刈り下限値、かつ探索完了・記録対象とする葉の popcount |
 | `--cols` | | `3159` | ビット列の長さ |
-| `--primes-count` | | 全素数 (249) | 使用する素数の最大個数制限 |
 | `--output` | `-o` | `shift_path.json` | JSON出力ファイルパス（実行時にタイムスタンプが挿入されます） |
 | `--max-depth` | | `249` | 出力設定に記録される予約パラメータ |
-| `--target` | `-t` | `447` | 出力設定に記録される予約パラメータ |
 
-> **Note**: `--max-depth` と `--target` は現在の探索条件には影響せず、実行設定として出力ファイルに記録されます。
+> **Note**: `--max-depth` は現在の探索条件には影響せず、実行設定として出力ファイルに記録されます。
 
 ## 出力ファイル形式
 
@@ -151,16 +146,12 @@ cargo run --release -- --depth 10 --limit 400 --primes-count 100 -o result.json
   "config": {
     "mode": "parallel",
     "depth": 8,
-    "limit": 447,
     "max_depth": 249,
-    "target": 447,
     "cols": 3159,
-    "primes_count": "all",
     "elapsed": "1.234567s"
   },
   "result": {
     "max_count": 447,
-    "results": 1,
     "shifts": [[1, 1, 4, 3, 5, 10, 1, 9]]
   }
 }
@@ -168,7 +159,6 @@ cargo run --release -- --depth 10 --limit 400 --primes-count 100 -o result.json
 
 - `config`: 実行時設定と経過時間
 - `result.max_count`: 早期終了までに到達した葉ノードの最大 popcount
-- `result.results`: 最初に `limit` にヒットした解の個数（見つかった場合は 1、見つからなかった場合は 0）
 - `result.shifts`: 見つかったシフト列の配列
 
 ## ライセンス

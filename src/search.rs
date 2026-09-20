@@ -2,7 +2,7 @@ use crate::bitmask::BitMask;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 基底行の生成と補集合シフトテーブルの作成
@@ -47,7 +47,6 @@ pub enum SearchMode {
 #[derive(Default)]
 pub struct SharedResults {
     pub max_count: usize,
-    pub results: usize,
     pub shifts: Vec<Vec<usize>>,
 }
 
@@ -59,13 +58,10 @@ struct BeamState {
 
 pub struct State {
     pub primes: Vec<usize>,
-    pub limit: usize,
     pub max_depth: usize,
-    pub target: usize,
     pub key: Vec<usize>,
     pub zero_mask: BitMask,
     pub max_count: usize,
-    pub results: usize,
     pub shifts: Vec<Vec<usize>>,
     pub node_count: u64,
     pub beam_width: usize,
@@ -73,21 +69,13 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(
-        primes: Vec<usize>,
-        limit: usize,
-        cols: usize,
-        shift_table: Vec<Vec<BitMask>>,
-    ) -> Self {
+    pub fn new(primes: Vec<usize>, cols: usize, shift_table: Vec<Vec<BitMask>>) -> Self {
         State {
             primes,
-            limit,
             max_depth: 249,
-            target: 447,
             key: Vec::new(),
             zero_mask: BitMask::new_ones(cols),
             max_count: 0,
-            results: 0,
             shifts: Vec::new(),
             node_count: 0,
             beam_width: 32,
@@ -106,7 +94,6 @@ impl State {
 
         self.key.clear();
         self.max_count = 0;
-        self.results = 0;
         self.shifts.clear();
 
         for level in 0..depth {
@@ -118,10 +105,6 @@ impl State {
                     key.push(i);
                     let node_mask = candidate.mask.bitand(&self.shift_table[level][i]);
                     let count = node_mask.count_ones();
-
-                    if count < self.limit {
-                        continue;
-                    }
 
                     if count < self.max_count {
                         continue;
@@ -136,11 +119,6 @@ impl State {
                         } else if count == self.max_count {
                             self.shifts.push(key.clone());
                             info!("best level={} key={:?} count={}", level, key, count);
-                        }
-
-                        if count == self.target {
-                            self.results += 1;
-                            info!("target level={} key={:?} count={}", level, key, count);
                         }
                     }
 
@@ -158,10 +136,6 @@ impl State {
             next_beam.sort_by(|lhs, rhs| rhs.mask.count_ones().cmp(&lhs.mask.count_ones()));
             next_beam.truncate(width);
             beam = next_beam;
-
-            if self.results > 0 {
-                break;
-            }
         }
 
         pb.finish_with_message("探索完了");
@@ -202,16 +176,10 @@ impl State {
             if self.node_count.is_multiple_of(10_000) {
                 pb.set_position(self.node_count);
                 pb.set_message(format!(
-                    "best: {} | hits: {} | depth: {}",
+                    "best: {} | depth: {}",
                     self.max_count,
-                    self.results,
                     self.key.len()
                 ));
-            }
-
-            if count < self.limit {
-                self.key.pop();
-                continue;
             }
 
             if count < self.max_count {
@@ -220,23 +188,14 @@ impl State {
             }
 
             if level + 1 >= depth {
-                if depth == self.max_depth {
-                    if count == self.target {
-                        self.results += 1;
-                        self.shifts.push(self.key.clone());
-                        info!("target level={} key={:?} count={}", level, self.key, count);
-                        self.key.pop();
-                        break;
-                    }
-                    if count > self.max_count {
-                        self.max_count = count;
-                        self.shifts.clear();
-                        self.shifts.push(self.key.clone());
-                        info!("best level={} key={:?} count={}", level, self.key, count);
-                    } else if count == self.max_count {
-                        self.shifts.push(self.key.clone());
-                        info!("best level={} key={:?} count={}", level, self.key, count);
-                    }
+                if count > self.max_count {
+                    self.max_count = count;
+                    self.shifts.clear();
+                    self.shifts.push(self.key.clone());
+                    info!("best level={} key={:?} count={}", level, self.key, count);
+                } else if count == self.max_count {
+                    self.shifts.push(self.key.clone());
+                    info!("best level={} key={:?} count={}", level, self.key, count);
                 }
                 self.key.pop();
                 continue;
@@ -254,31 +213,24 @@ impl State {
 
     pub fn search_parallel(&self, depth: usize) -> SharedResults {
         let max_count = Arc::new(AtomicUsize::new(0));
-        let results = Arc::new(AtomicUsize::new(0));
         let shifts = Arc::new(Mutex::new(Vec::<Vec<usize>>::new()));
         let node_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
         let pb = progress_bar();
 
         let p0 = self.primes[0];
         (0..p0).into_par_iter().rev().for_each(|i| {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-
             let mut key = vec![i];
             let base_mask = self.zero_mask.bitand(&self.shift_table[0][i]);
             let count = base_mask.count_ones();
-            if count < self.limit {
-                return;
-            }
-
             if depth == 1 {
-                max_count.fetch_max(count, Ordering::Relaxed);
-                if count == self.limit && !stop.swap(true, Ordering::Relaxed) {
-                    results.fetch_add(1, Ordering::Relaxed);
+                let previous_max = max_count.load(Ordering::Relaxed);
+                if count > previous_max {
+                    max_count.store(count, Ordering::Relaxed);
+                    let mut found_shifts = shifts.lock().unwrap();
+                    found_shifts.clear();
+                    found_shifts.push(key.clone());
+                } else if count == previous_max {
                     shifts.lock().unwrap().push(key.clone());
-                    info!("target level=0 key={:?} count={}", key, count);
                 }
                 return;
             }
@@ -290,9 +242,6 @@ impl State {
             }];
 
             while let Some(frame) = stack.last_mut() {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
                 if frame.next_idx == 0 {
                     stack.pop();
                     if stack.last().is_some() {
@@ -313,16 +262,10 @@ impl State {
                 if n.is_multiple_of(10_000) {
                     pb.set_position(n);
                     pb.set_message(format!(
-                        "best: {} | hits: {} | depth: {}",
+                        "best: {} | depth: {}",
                         max_count.load(Ordering::Relaxed),
-                        results.load(Ordering::Relaxed),
                         key.len()
                     ));
-                }
-
-                if c_count < self.limit {
-                    key.pop();
-                    continue;
                 }
 
                 if c_count < max_count.load(Ordering::Relaxed) {
@@ -331,28 +274,19 @@ impl State {
                 }
 
                 if level + 1 >= depth {
-                    if c_count == self.limit && !stop.swap(true, Ordering::Relaxed) {
-                        results.fetch_add(1, Ordering::Relaxed);
+                    let previous_max = max_count.load(Ordering::Relaxed);
+                    if c_count > previous_max {
+                        max_count.store(c_count, Ordering::Relaxed);
+                        let mut found_shifts = shifts.lock().unwrap();
+                        found_shifts.clear();
+                        found_shifts.push(key.clone());
+                        info!("best level={} key={:?} count={}", level, key, c_count);
+                    } else if c_count == previous_max {
                         shifts.lock().unwrap().push(key.clone());
-                        info!("target level={} key={:?} count={}", level, key, c_count);
-                    }
-                    if stop.load(Ordering::Relaxed) {
-                        break;
+                        info!("best level={} key={:?} count={}", level, key, c_count);
                     }
                     key.pop();
                     continue;
-                }
-
-                if depth == self.max_depth {
-                    if c_count > max_count.load(Ordering::Relaxed) {
-                        max_count.store(c_count, Ordering::Relaxed);
-                        shifts.lock().unwrap().clear();
-                        shifts.lock().unwrap().push(key.clone());
-                        info!("best level={} key={:?} count={}", level, key, c_count);
-                    } else if c_count == max_count.load(Ordering::Relaxed) {
-                        shifts.lock().unwrap().push(key.clone());
-                        info!("best level={} key={:?} count={}", level, key, c_count);
-                    }
                 }
 
                 stack.push(Frame {
@@ -367,7 +301,6 @@ impl State {
         let final_shifts = shifts.lock().unwrap();
         SharedResults {
             max_count: max_count.load(Ordering::Relaxed),
-            results: results.load(Ordering::Relaxed),
             shifts: final_shifts.clone(),
         }
     }
@@ -397,25 +330,25 @@ mod tests {
     }
 
     #[test]
-    fn sequential_and_parallel_search_find_valid_results() {
+    fn sequential_and_parallel_search_find_best_results() {
         let primes = vec![2, 3];
         let cols = 4;
         let table = build_shift_table(&primes, cols);
-        let mut sequential = State::new(primes.clone(), 1, cols, table.clone());
+        let mut sequential = State::new(primes.clone(), cols, table.clone());
         sequential.max_depth = 2;
-        sequential.target = 1;
         sequential.search(2);
-        let mut parallel = State::new(primes.clone(), 1, cols, table);
+        let mut parallel = State::new(primes.clone(), cols, table);
         parallel.max_depth = 2;
-        parallel.target = 1;
         let result = parallel.search_parallel(2);
 
-        assert_eq!(sequential.results, 1);
-        assert_eq!(result.results, 1);
-        assert_eq!(result.shifts.len(), 1);
-        assert_eq!(result.shifts[0].len(), 2);
-        for (level, &shift) in result.shifts[0].iter().enumerate() {
-            assert!(shift < primes[level]);
+        assert_eq!(sequential.max_count, 2);
+        assert_eq!(result.max_count, 2);
+        assert!(!result.shifts.is_empty());
+        for shift_path in &result.shifts {
+            assert_eq!(shift_path.len(), 2);
+            for (level, &shift) in shift_path.iter().enumerate() {
+                assert!(shift < primes[level]);
+            }
         }
     }
 
@@ -424,13 +357,12 @@ mod tests {
         let primes = vec![2, 3];
         let cols = 4;
         let table = build_shift_table(&primes, cols);
-        let mut beam = State::new(primes, 1, cols, table);
+        let mut beam = State::new(primes, cols, table);
         beam.max_depth = 2;
-        beam.target = 1;
 
         beam.search_beam(2, 2);
 
-        assert!(beam.results >= 1);
+        assert_eq!(beam.max_count, 2);
         assert!(!beam.shifts.is_empty());
         assert_eq!(beam.shifts[0].len(), 2);
     }
