@@ -5,7 +5,7 @@ mod search;
 
 use clap::Parser;
 use log::{info, LevelFilter};
-use output::with_timestamp;
+use output::dated_output_path;
 use primes::generate_primes;
 use search::{build_shift_table, SearchMode, State};
 use serde::Serialize;
@@ -18,7 +18,7 @@ use std::time::Instant;
 #[derive(Serialize)]
 struct OutputFile<'a> {
     config: OutputConfig<'a>,
-    result: OutputResult<'a>,
+    result: OutputResult,
 }
 
 #[derive(Serialize)]
@@ -32,9 +32,8 @@ struct OutputConfig<'a> {
 }
 
 #[derive(Serialize)]
-struct OutputResult<'a> {
+struct OutputResult {
     max_count: usize,
-    shifts: &'a [Vec<usize>],
 }
 
 #[derive(Parser, Debug)]
@@ -61,12 +60,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 3159, help = "列数 (長さ)")]
     pub cols: usize,
 
-    #[arg(
-        short,
-        long,
-        default_value = "shift_path.json",
-        help = "出力ファイルパス"
-    )]
+    #[arg(short, long, default_value = ".", help = "出力ディレクトリ")]
     pub output: PathBuf,
 }
 
@@ -125,13 +119,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("探索時間: {:?}", elapsed);
     info!("最大値: {}", state.max_count);
 
-    let output_path = with_timestamp(&cli.output, cli.depth);
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(&cli.output)?;
+    let shift_path = dated_output_path(&cli.output, "shift_path", cli.depth, "txt");
+    let result_path = dated_output_path(&cli.output, "result", cli.depth, "json");
+
+    let shift_file = File::create(&shift_path)?;
+    let mut shift_writer = BufWriter::new(shift_file);
+    for shifts in &state.shifts {
+        let line = shifts
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        writeln!(shift_writer, "{line}")?;
     }
-    let file = File::create(&output_path)?;
-    let mut writer = BufWriter::new(file);
-    info!("出力ファイル: {}", output_path.display());
+    info!("シフトパス出力ファイル: {}", shift_path.display());
 
     let output = OutputFile {
         config: OutputConfig {
@@ -148,11 +150,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         result: OutputResult {
             max_count: state.max_count,
-            shifts: &state.shifts,
         },
     };
-    serde_json::to_writer_pretty(&mut writer, &output)?;
-    writeln!(writer)?;
+    let result_file = File::create(&result_path)?;
+    let mut result_writer = BufWriter::new(result_file);
+    serde_json::to_writer_pretty(&mut result_writer, &output)?;
+    writeln!(result_writer)?;
+    info!("探索結果出力ファイル: {}", result_path.display());
 
     info!("HLSearch 終了");
     Ok(())
@@ -169,7 +173,7 @@ mod tests {
             beam_width: 32,
             max_depth: 249,
             cols: 4,
-            output: PathBuf::from("shift_path.txt"),
+            output: PathBuf::from("."),
         }
     }
 

@@ -87,7 +87,7 @@ cargo run --release -- --mode beam --beam-width 32 --depth 8
 素数の個数や出力先を指定して実行:
 
 ```bash
-cargo run --release -- --depth 10 -o result.json
+cargo run --release -- --depth 10 -o output
 ```
 
 > **Note**: 並列モード時のスレッド数は Rayon の既定値（論理コア数）となります。環境変数 `RAYON_NUM_THREADS` でスレッド数を指定可能です。
@@ -130,16 +130,17 @@ cargo run --release -- --depth 10 -o result.json
 | `--mode` | `-m` | `beam` | 探索モード（`sequential` / `parallel` / `beam`） |
 | `--beam-width` |  | `32` | `beam` モードで保持する候補の最大数 |
 | `--cols` | | `3159` | ビット列の長さ |
-| `--output` | `-o` | `shift_path.json` | JSON出力ファイルパス（実行時にタイムスタンプと `depth` が挿入されます） |
+| `--output` | `-o` | `.` | 出力ディレクトリ |
 | `--max-depth` | | `249` | 出力設定に記録される予約パラメータ |
 
 > **Note**: `--max-depth` は現在の探索条件には影響せず、実行設定として出力ファイルに記録されます。
 
 ## 出力ファイル形式
 
-出力ファイル名には実行時のタイムスタンプと探索深度が付与されます（例: `shift_path.json` を深さ 8 で実行した場合 `shift_path_YYYYMMDD_HHMMSS(depth8).json`）。
+実行時の日付と探索深度を付けて、次の2ファイルを出力します。
 
-ファイルには実行時設定（`config`）と探索結果（`result`）を含むJSONオブジェクトが出力されます。
+- `shift_path_depth8_YYYYMMDD.txt`: 見つかったシフト列を1行に1列、空白区切りで出力
+- `result_depth8_YYYYMMDD.json`: 実行設定と最大 popcount を含む探索結果
 
 ```json
 {
@@ -152,15 +153,13 @@ cargo run --release -- --depth 10 -o result.json
     "elapsed": "1.234567s"
   },
   "result": {
-    "max_count": 447,
-    "shifts": [[1, 1, 4, 3, 5, 10, 1, 9]]
+    "max_count": 447
   }
 }
 ```
 
 - `config`: 実行時設定と経過時間
 - `result.max_count`: 早期終了までに到達した葉ノードの最大 popcount
-- `result.shifts`: 見つかったシフト列の配列
 
 ## ライセンス
 
