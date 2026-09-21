@@ -72,6 +72,18 @@ impl Cli {
         if self.cols == 0 {
             return Err("cols must be at least 1".to_string());
         }
+        if self.beam_width == 0 {
+            return Err("beam_width must be at least 1".to_string());
+        }
+        if self.max_depth == 0 {
+            return Err("max_depth must be at least 1".to_string());
+        }
+        if self.depth > self.max_depth {
+            return Err(format!(
+                "depth ({}) cannot exceed max_depth ({})",
+                self.depth, self.max_depth
+            ));
+        }
         if self.depth > available_primes {
             return Err(format!(
                 "depth ({}) cannot exceed available primes ({})",
@@ -188,5 +200,39 @@ mod tests {
         cli = test_cli();
         cli.depth = 4;
         assert!(cli.validate(3).is_err());
+    }
+
+    #[test]
+    fn cli_validation_rejects_unexpected_zero_or_empty_inputs() {
+        let mut cli = test_cli();
+        cli.beam_width = 0;
+        assert!(cli.validate(3).is_err());
+
+        let mut beam_cli = test_cli();
+        beam_cli.max_depth = 0;
+        assert!(beam_cli.validate(3).is_err());
+
+        let zero_depth_cli = Cli {
+            depth: 0,
+            mode: SearchMode::Parallel,
+            beam_width: 1,
+            max_depth: 2,
+            cols: 1,
+            output: PathBuf::from("."),
+        };
+        assert!(zero_depth_cli.validate(0).is_err());
+
+        let depth_exceeds_max_depth = Cli {
+            depth: 5,
+            mode: SearchMode::Beam,
+            beam_width: 1,
+            max_depth: 3,
+            cols: 1,
+            output: PathBuf::from("."),
+        };
+        assert!(depth_exceeds_max_depth.validate(10).is_err());
+
+        let empty_primes_cli = test_cli();
+        assert!(empty_primes_cli.validate(0).is_err());
     }
 }
