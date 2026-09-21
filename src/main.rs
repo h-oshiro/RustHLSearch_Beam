@@ -27,6 +27,7 @@ struct OutputConfig<'a> {
     depth: usize,
     max_depth: usize,
     cols: usize,
+    beam_width: usize,
     elapsed: String,
 }
 
@@ -46,7 +47,7 @@ pub struct Cli {
         short,
         long,
         value_enum,
-        default_value_t = SearchMode::Parallel,
+        default_value_t = SearchMode::Beam,
         help = "探索モード (sequential | parallel | beam)"
     )]
     pub mode: SearchMode,
@@ -124,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("探索時間: {:?}", elapsed);
     info!("最大値: {}", state.max_count);
 
-    let output_path = with_timestamp(&cli.output);
+    let output_path = with_timestamp(&cli.output, cli.depth);
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -142,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             depth: cli.depth,
             max_depth: cli.max_depth,
             cols: cli.cols,
+            beam_width: cli.beam_width,
             elapsed: format!("{elapsed:?}"),
         },
         result: OutputResult {

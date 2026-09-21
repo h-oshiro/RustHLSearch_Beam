@@ -1,8 +1,8 @@
 use chrono::Local;
 use std::path::{Path, PathBuf};
 
-/// 出力ファイルパスにタイムスタンプ (YYYYMMDD_HHMMSS) を挿入する
-pub fn with_timestamp(path: &Path) -> PathBuf {
+/// 出力ファイルパスにタイムスタンプ (YYYYMMDD_HHMMSS) と depth を挿入する
+pub fn with_timestamp(path: &Path, depth: usize) -> PathBuf {
     let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
 
     let parent = path.parent();
@@ -13,8 +13,8 @@ pub fn with_timestamp(path: &Path) -> PathBuf {
     let ext = path.extension().and_then(|s| s.to_str());
 
     let new_name = match ext {
-        Some(ext) => format!("{}_{}.{}", stem, timestamp, ext),
-        None => format!("{}_{}", stem, timestamp),
+        Some(ext) => format!("{}_{}(depth{}).{}", stem, timestamp, depth, ext),
+        None => format!("{}_{}(depth{})", stem, timestamp, depth),
     };
 
     match parent {
@@ -30,10 +30,11 @@ mod tests {
 
     #[test]
     fn timestamped_path_preserves_parent_and_extension() {
-        let path = with_timestamp(Path::new("results/shift_path.json"));
+        let path = with_timestamp(Path::new("results/shift_path.json"), 13);
         let file_name = path.file_name().unwrap().to_str().unwrap();
         assert_eq!(path.parent(), Some(Path::new("results")));
         assert!(file_name.starts_with("shift_path_"));
+        assert!(file_name.contains("(depth13)"));
         assert!(file_name.ends_with(".json"));
     }
 }

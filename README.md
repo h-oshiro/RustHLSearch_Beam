@@ -66,7 +66,7 @@ cargo run --release -- --help
 
 ### 実行例
 
-デフォルト（並列モード、深さ 8、cols 3159）:
+デフォルト（ビームサーチ、深さ 8、cols 3159）:
 
 ```bash
 cargo run --release
@@ -127,17 +127,17 @@ cargo run --release -- --depth 10 -o result.json
 | フラグ | 短縮 | 既定値 | 説明 |
 | --- | --- | --- | --- |
 | `--depth` | `-d` | `8` | 探索する階層数（使用する素数の個数） |
-| `--mode` | `-m` | `parallel` | 探索モード（`sequential` / `parallel` / `beam`） |
+| `--mode` | `-m` | `beam` | 探索モード（`sequential` / `parallel` / `beam`） |
 | `--beam-width` |  | `32` | `beam` モードで保持する候補の最大数 |
 | `--cols` | | `3159` | ビット列の長さ |
-| `--output` | `-o` | `shift_path.json` | JSON出力ファイルパス（実行時にタイムスタンプが挿入されます） |
+| `--output` | `-o` | `shift_path.json` | JSON出力ファイルパス（実行時にタイムスタンプと `depth` が挿入されます） |
 | `--max-depth` | | `249` | 出力設定に記録される予約パラメータ |
 
 > **Note**: `--max-depth` は現在の探索条件には影響せず、実行設定として出力ファイルに記録されます。
 
 ## 出力ファイル形式
 
-出力ファイル名には実行時のタイムスタンプが付与されます（例: `shift_path.json` の場合 `shift_path_YYYYMMDD_HHMMSS.json`）。
+出力ファイル名には実行時のタイムスタンプと探索深度が付与されます（例: `shift_path.json` を深さ 8 で実行した場合 `shift_path_YYYYMMDD_HHMMSS(depth8).json`）。
 
 ファイルには実行時設定（`config`）と探索結果（`result`）を含むJSONオブジェクトが出力されます。
 
@@ -148,6 +148,7 @@ cargo run --release -- --depth 10 -o result.json
     "depth": 8,
     "max_depth": 249,
     "cols": 3159,
+    "beam_width": 32,
     "elapsed": "1.234567s"
   },
   "result": {

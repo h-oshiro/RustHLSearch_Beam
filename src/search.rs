@@ -106,6 +106,9 @@ impl State {
                     let node_mask = candidate.mask.bitand(&self.shift_table[level][i]);
                     let count = node_mask.count_ones();
 
+                    if count + (depth - level) < self.max_count{
+                        continue;
+                    }
                     if count < self.max_count {
                         continue;
                     }
@@ -115,10 +118,10 @@ impl State {
                             self.max_count = count;
                             self.shifts.clear();
                             self.shifts.push(key.clone());
-                            info!("best level={} key={:?} count={}", level, key, count);
+                            info!("best level={} key={:?} count={}", level+1, key, count);
                         } else if count == self.max_count {
                             self.shifts.push(key.clone());
-                            info!("best level={} key={:?} count={}", level, key, count);
+                            // info!("best level={} key={:?} count={}", level+1, key, count);
                         }
                     }
 
@@ -182,6 +185,11 @@ impl State {
                 ));
             }
 
+            if count + (depth - level) < self.max_count {
+                self.key.pop();
+                continue;
+            }
+
             if count < self.max_count {
                 self.key.pop();
                 continue;
@@ -192,10 +200,10 @@ impl State {
                     self.max_count = count;
                     self.shifts.clear();
                     self.shifts.push(self.key.clone());
-                    info!("best level={} key={:?} count={}", level, self.key, count);
+                    info!("best level={} key={:?} count={}", level+1, self.key, count);
                 } else if count == self.max_count {
                     self.shifts.push(self.key.clone());
-                    info!("best level={} key={:?} count={}", level, self.key, count);
+                    // info!("best level={} key={:?} count={}", level+1, self.key, count);
                 }
                 self.key.pop();
                 continue;
@@ -268,6 +276,11 @@ impl State {
                     ));
                 }
 
+                if c_count + (depth - level) < max_count.load(Ordering::Relaxed) {
+                    key.pop();
+                    continue;
+                } 
+
                 if c_count < max_count.load(Ordering::Relaxed) {
                     key.pop();
                     continue;
@@ -280,10 +293,10 @@ impl State {
                         let mut found_shifts = shifts.lock().unwrap();
                         found_shifts.clear();
                         found_shifts.push(key.clone());
-                        info!("best level={} key={:?} count={}", level, key, c_count);
+                        info!("best level={} key={:?} count={}", level+1, key, c_count);
                     } else if c_count == previous_max {
                         shifts.lock().unwrap().push(key.clone());
-                        info!("best level={} key={:?} count={}", level, key, c_count);
+                        // info!("best level={} key={:?} count={}", level+1, key, c_count);
                     }
                     key.pop();
                     continue;
