@@ -1,6 +1,6 @@
 use crate::bitmask::BitMask;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::info;
+use log::debug;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,10 +44,36 @@ pub enum SearchMode {
     Beam,
 }
 
-#[derive(Default)]
-pub struct SharedResults {
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct SearchResult {
     pub max_count: usize,
     pub shifts: Vec<Vec<usize>>,
+}
+
+impl SearchResult {
+    pub fn record(&mut self, count: usize, key: Vec<usize>) {
+        match count.cmp(&self.max_count) {
+            std::cmp::Ordering::Greater => {
+                self.max_count = count;
+                self.shifts.clear();
+                self.shifts.push(key);
+            }
+            std::cmp::Ordering::Equal => self.shifts.push(key),
+            std::cmp::Ordering::Less => {}
+        }
+    }
+
+    pub fn merge(&mut self, other: SearchResult) {
+        if other.max_count > self.max_count {
+            self.max_count = other.max_count;
+            self.shifts = other.shifts;
+            return;
+        }
+
+        if other.max_count == self.max_count {
+            self.shifts.extend(other.shifts);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -93,8 +119,7 @@ impl State {
         }];
 
         self.key.clear();
-        self.max_count = 0;
-        self.shifts.clear();
+        let mut result = SearchResult::default();
 
         for level in 0..depth {
             let mut next_beam = Vec::new();
@@ -106,22 +131,17 @@ impl State {
                     let node_mask = candidate.mask.bitand(&self.shift_table[level][i]);
                     let count = node_mask.count_ones();
 
-                    if count + (depth - level) < self.max_count {
+                    if count + (depth - level) < result.max_count {
                         continue;
                     }
-                    if count < self.max_count {
+                    if count < result.max_count {
                         continue;
                     }
 
                     if level + 1 >= depth {
-                        if count > self.max_count {
-                            self.max_count = count;
-                            self.shifts.clear();
-                            self.shifts.push(key.clone());
-                            info!("best level={} key={:?} count={}", level + 1, key, count);
-                        } else if count == self.max_count {
-                            self.shifts.push(key.clone());
-                            // info!("best level={} key={:?} count={}", level+1, key, count);
+                        result.record(count, key.clone());
+                        if count >= result.max_count {
+                            debug!("best level={} key={:?} count={}", level + 1, key, count);
                         }
                     }
 
@@ -141,6 +161,8 @@ impl State {
             beam = next_beam;
         }
 
+        self.max_count = result.max_count;
+        self.shifts = result.shifts;
         pb.finish_with_message("探索完了");
     }
 
@@ -155,6 +177,7 @@ impl State {
             base_mask: self.zero_mask.clone(),
             next_idx: self.primes[0],
         }];
+        let mut result = SearchResult::default();
 
         while let Some(frame) = stack.last_mut() {
             if frame.next_idx == 0 {
@@ -180,36 +203,29 @@ impl State {
                 pb.set_position(self.node_count);
                 pb.set_message(format!(
                     "best: {} | depth: {}",
-                    self.max_count,
+                    result.max_count,
                     self.key.len()
                 ));
             }
 
-            if count + (depth - level) < self.max_count {
+            if count + (depth - level) < result.max_count {
                 self.key.pop();
                 continue;
             }
 
-            if count < self.max_count {
+            if count < result.max_count {
                 self.key.pop();
                 continue;
             }
 
             if level + 1 >= depth {
-                if count > self.max_count {
-                    self.max_count = count;
-                    self.shifts.clear();
-                    self.shifts.push(self.key.clone());
-                    info!(
-                        "best level={} key={:?} count={}",
-                        level + 1,
-                        self.key,
-                        count
-                    );
-                } else if count == self.max_count {
-                    self.shifts.push(self.key.clone());
-                    // info!("best level={} key={:?} count={}", level+1, self.key, count);
-                }
+                result.record(count, self.key.clone());
+                debug!(
+                    "best level={} key={:?} count={}",
+                    level + 1,
+                    self.key,
+                    count
+                );
                 self.key.pop();
                 continue;
             }
@@ -221,10 +237,13 @@ impl State {
                 next_idx: self.primes[level + 1],
             });
         }
+
+        self.max_count = result.max_count;
+        self.shifts = result.shifts;
         pb.finish_with_message("探索完了");
     }
 
-    pub fn search_parallel(&self, depth: usize) -> SharedResults {
+    pub fn search_parallel(&self, depth: usize) -> SearchResult {
         let max_count = Arc::new(AtomicUsize::new(0));
         let shifts = Arc::new(Mutex::new(Vec::<Vec<usize>>::new()));
         let node_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -298,7 +317,7 @@ impl State {
                         let mut found_shifts = shifts.lock().unwrap();
                         found_shifts.clear();
                         found_shifts.push(key.clone());
-                        info!("best level={} key={:?} count={}", level + 1, key, c_count);
+                        debug!("best level={} key={:?} count={}", level + 1, key, c_count);
                     } else if c_count == previous_max {
                         shifts.lock().unwrap().push(key.clone());
                         // info!("best level={} key={:?} count={}", level+1, key, c_count);
@@ -317,10 +336,12 @@ impl State {
 
         pb.finish_with_message("探索完了");
         let final_shifts = shifts.lock().unwrap();
-        SharedResults {
+        let mut result = SearchResult::default();
+        result.merge(SearchResult {
             max_count: max_count.load(Ordering::Relaxed),
             shifts: final_shifts.clone(),
-        }
+        });
+        result
     }
 }
 
@@ -336,7 +357,7 @@ fn progress_bar() -> ProgressBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_shift_table, State};
+    use super::{build_shift_table, SearchResult, State};
 
     #[test]
     fn build_shift_table_creates_expected_complement_masks() {
@@ -383,5 +404,18 @@ mod tests {
         assert_eq!(beam.max_count, 2);
         assert!(!beam.shifts.is_empty());
         assert_eq!(beam.shifts[0].len(), 2);
+    }
+
+    #[test]
+    fn search_result_tracks_best_count_and_ties() {
+        let mut result = SearchResult::default();
+
+        result.record(2, vec![1]);
+        result.record(2, vec![0]);
+        result.record(3, vec![1, 0]);
+        result.record(3, vec![0, 1]);
+
+        assert_eq!(result.max_count, 3);
+        assert_eq!(result.shifts.len(), 2);
     }
 }
