@@ -126,12 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shift_file = File::create(&shift_path)?;
     let mut shift_writer = BufWriter::new(shift_file);
     for shifts in &state.shifts {
-        let line = shifts
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(" ");
-        writeln!(shift_writer, "{line}")?;
+        writeln!(shift_writer, "{shifts:?}")?;
     }
     info!("シフトパス出力ファイル: {}", shift_path.display());
 
